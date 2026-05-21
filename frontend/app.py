@@ -86,19 +86,128 @@ def load_executions(test_case_id=None):
     return api("get", url) or []
 
 
+def jira_api(method: str, path: str, **kwargs):
+    """Call backend Jira endpoints with stored credentials in headers."""
+    email = st.session_state.get("jira_email", "")
+    token = st.session_state.get("jira_token", "")
+    headers = {"X-Jira-Email": email, "X-Jira-Token": token}
+    try:
+        r = getattr(requests, method)(
+            f"{API}{path}", headers=headers, **kwargs
+        )
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.ConnectionError:
+        st.error("⚠️  Cannot reach the backend.")
+        return None
+    except Exception as e:
+        st.error(f"Jira API error: {e}")
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOGIN PAGE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def show_login():
+    st.markdown("""
+    <style>
+    .login-wrap {
+        max-width: 460px; margin: 80px auto 0 auto;
+        background: white; border-radius: 18px;
+        padding: 40px 44px;
+        box-shadow: 0 8px 40px rgba(0,0,0,0.12);
+    }
+    .login-wrap h2 { color: #1E3A5F; text-align: center; margin-bottom: 4px; }
+    .login-wrap p  { color: #7F8C8D; text-align: center; font-size: 0.9rem; margin-bottom: 28px; }
+    </style>
+    <div class="login-wrap">
+        <h2>🧪 QA Sprint Tracker</h2>
+        <p>Sign in with your Jira credentials</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.form("login_form"):
+        email = st.text_input("Jira Email", placeholder="you@sonnen.de")
+        token = st.text_input(
+            "Jira API Token",
+            type="password",
+            placeholder="Paste your Atlassian API token",
+            help="Get it from: https://id.atlassian.com/manage-profile/security/api-tokens",
+        )
+        submitted = st.form_submit_button("🔐  Sign In", use_container_width=True)
+
+    if submitted:
+        if not email or not token:
+            st.error("Please enter both email and token.")
+            return
+        with st.spinner("Verifying with Jira…"):
+            try:
+                r = requests.post(
+                    f"{API}/jira/verify",
+                    headers={"X-Jira-Email": email, "X-Jira-Token": token},
+                )
+                if r.status_code == 200:
+                    user = r.json()
+                    st.session_state["jira_email"]   = email
+                    st.session_state["jira_token"]   = token
+                    st.session_state["jira_user"]    = user
+                    st.session_state["logged_in"]    = True
+                    st.rerun()
+                else:
+                    try:
+                        detail = r.json().get("detail", {})
+                        hint   = detail.get("hint", "") if isinstance(detail, dict) else ""
+                    except Exception:
+                        hint = ""
+                    st.error("❌ Authentication failed.")
+                    if hint:
+                        st.warning(f"💡 {hint}")
+            except Exception:
+                st.error("⚠️  Cannot reach the backend. Make sure it is running.")
+
+    st.markdown("---")
+    st.caption("🔑 How to get your API token: go to **https://id.atlassian.com/manage-profile/security/api-tokens** → Create API token")
+
+
+# ── Guard: show login if not authenticated ────────────────────────────────────
+if not st.session_state.get("logged_in"):
+    show_login()
+    st.stop()
+
+# ── User is logged in ─────────────────────────────────────────────────────────
+user = st.session_state.get("jira_user", {})
+
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🧪 QA Sprint Tracker")
     st.markdown("---")
+    if user.get("avatar"):
+        col_av, col_nm = st.columns([1, 3])
+        with col_av:
+            st.image(user["avatar"], width=38)
+        with col_nm:
+            st.markdown(f"**{user.get('display_name','You')}**")
+            st.caption(user.get("email", ""))
+    else:
+        st.markdown(f"👤 **{user.get('display_name','You')}**")
+    st.markdown("---")
     page = st.radio(
         "Navigate",
-        ["🏠  Dashboard", "🗓️  Sprints", "🎫  Tickets",
+        ["🏠  Dashboard", "🗓️  Sprints & Tickets",
          "📋  Test Cases", "▶️  Execute Tests",
          "🌍  Environment Matrix", "📊  Sprint Report"],
         label_visibility="collapsed",
     )
     st.markdown("---")
-    st.caption("QA Sprint Tracker v1.0")
+    if st.button("🚪  Sign Out", use_container_width=True):
+        for k in ["logged_in", "jira_email", "jira_token", "jira_user",
+                  "selected_sprint", "selected_sprint_name", "jira_tickets_cache"]:
+            st.session_state.pop(k, None)
+        st.rerun()
+    st.caption("QA Sprint Tracker v2.0 · Jira Connected")
+
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -109,26 +218,26 @@ if page == "🏠  Dashboard":
     st.markdown("Your quality work — made visible.")
     st.markdown("---")
 
-    sprints   = load_sprints()
-    tickets   = load_tickets()
     all_tcs   = load_test_cases()
     all_exes  = load_executions()
+    all_tickets = load_tickets()
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: metric_card("Sprints",        len(sprints))
-    with c2: metric_card("Tickets Tested", len(tickets))
-    with c3: metric_card("Test Cases",     len(all_tcs))
-    with c4: metric_card("Executions",     len(all_exes))
-    with c5:
+    with c1: metric_card("Tickets Tested", len(all_tickets))
+    with c2: metric_card("Test Cases",     len(all_tcs))
+    with c3: metric_card("Executions",     len(all_exes))
+    with c4:
         bugs = sum(1 for e in all_exes if e.get("bug_id"))
         metric_card("Bugs Logged", bugs, "fail")
+    with c5:
+        passed = sum(1 for e in all_exes if e.get("status") == "Pass")
+        rate = f"{passed/len(all_exes)*100:.0f}%" if all_exes else "—"
+        metric_card("Pass Rate", rate, "pass")
 
     st.markdown("")
 
     if all_exes:
         col1, col2 = st.columns(2)
-
-        # Donut chart — overall pass/fail
         with col1:
             st.markdown("#### Overall Execution Results")
             counts = {"Pass": 0, "Fail": 0, "Blocked": 0}
@@ -138,12 +247,10 @@ if page == "🏠  Dashboard":
                 labels=list(counts.keys()),
                 values=list(counts.values()),
                 hole=0.55,
-                marker_colors=["#27AE60", "#E74C3C", "#F39C12", "#95A5A6"],
+                marker_colors=["#27AE60", "#E74C3C", "#F39C12"],
             ))
             fig.update_layout(margin=dict(t=0, b=0), height=280, showlegend=True)
             st.plotly_chart(fig, use_container_width=True)
-
-        # Bar chart — executions per platform×environment
         with col2:
             st.markdown("#### Executions by Platform & Environment")
             df = pd.DataFrame(all_exes)
@@ -152,10 +259,7 @@ if page == "🏠  Dashboard":
                 fig2 = px.bar(
                     grp, x="platform", y="count", color="status", barmode="group",
                     facet_col="environment",
-                    color_discrete_map={
-                        "Pass": "#27AE60", "Fail": "#E74C3C",
-                        "Blocked": "#F39C12"
-                    },
+                    color_discrete_map={"Pass": "#27AE60", "Fail": "#E74C3C", "Blocked": "#F39C12"},
                     height=280,
                 )
                 fig2.update_layout(margin=dict(t=20, b=0))
@@ -165,97 +269,122 @@ if page == "🏠  Dashboard":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE: SPRINTS
+# PAGE: SPRINTS & TICKETS  (Jira-powered)
 # ══════════════════════════════════════════════════════════════════════════════
-elif page == "🗓️  Sprints":
-    st.title("🗓️ Sprints")
+elif page == "🗓️  Sprints & Tickets":
+    st.title("🗓️ Sprints & Tickets")
+    st.caption("Live from Jira · sonnen.atlassian.net / APD")
 
-    with st.expander("➕  Create New Sprint", expanded=False):
-        with st.form("new_sprint"):
-            name       = st.text_input("Sprint Name", placeholder="e.g. Sprint 42")
-            goal       = st.text_area("Sprint Goal (optional)")
-            col1, col2 = st.columns(2)
-            start_date = col1.date_input("Start Date")
-            end_date   = col2.date_input("End Date")
-            if st.form_submit_button("Create Sprint"):
-                result = api("post", "/sprints/", json={
-                    "name": name,
-                    "goal": goal,
-                    "start_date": start_date.isoformat() if start_date else None,
-                    "end_date":   end_date.isoformat()   if end_date   else None,
-                })
-                if result:
-                    st.success(f"✅ Sprint **{name}** created!")
-                    st.rerun()
+    # ── Fetch sprints from Jira ───────────────────────────────────────────────
+    STATE_COLORS = {"active": "🟢", "future": "🔵", "closed": "⚫"}
 
-    sprints = load_sprints()
-    if sprints:
-        for s in sprints:
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                st.markdown(f"### 📅 {s['name']}")
-                if s.get("goal"):
-                    st.caption(f"Goal: {s['goal']}")
-                st.caption(f"Created: {s['created_at'][:10]}")
-            with col2:
-                if st.button("🗑️", key=f"del_sprint_{s['id']}", help="Delete sprint"):
-                    api("delete", f"/sprints/{s['id']}")
-                    st.rerun()
-            st.markdown("---")
-    else:
-        st.info("No sprints yet. Create your first sprint above.")
+    with st.spinner("Fetching sprints from Jira…"):
+        sprints = jira_api("get", "/jira/sprints")
 
+    if not sprints:
+        st.error("Could not load sprints from Jira.")
+        st.stop()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PAGE: TICKETS
-# ══════════════════════════════════════════════════════════════════════════════
-elif page == "🎫  Tickets":
-    st.title("🎫 Tickets")
+    # Build sprint selector
+    sprint_options = {
+        f"{STATE_COLORS.get(s['state'], '⚪')}  {s['name']}  [{s['state'].upper()}]": s
+        for s in sprints
+    }
+    selected_label = st.selectbox("Select Sprint", list(sprint_options.keys()))
+    selected_sprint = sprint_options[selected_label]
 
-    sprints = load_sprints()
-    sprint_map = {s["name"]: s["id"] for s in sprints}
+    if selected_sprint.get("goal"):
+        st.info(f"🎯 **Sprint Goal:** {selected_sprint['goal']}")
 
-    with st.expander("➕  Add New Ticket", expanded=False):
-        with st.form("new_ticket"):
-            col1, col2 = st.columns(2)
-            external_id  = col1.text_input("Ticket ID", placeholder="JIRA-123")
-            ticket_type  = col2.selectbox("Type", ["feature", "bug", "improvement"])
-            title        = st.text_input("Title", placeholder="Describe the ticket briefly")
-            description  = st.text_area("Description / Acceptance Criteria", height=120)
-            sprint_name  = st.selectbox("Assign to Sprint", ["— None —"] + list(sprint_map.keys()))
+    col_d1, col_d2 = st.columns(2)
+    if selected_sprint.get("start_date"):
+        col_d1.caption(f"📅 Start: {selected_sprint['start_date'][:10]}")
+    if selected_sprint.get("end_date"):
+        col_d2.caption(f"📅 End: {selected_sprint['end_date'][:10]}")
 
-            if st.form_submit_button("💾  Save Ticket"):
-                sprint_id = sprint_map.get(sprint_name)
-                result = api("post", "/tickets/", json={
-                    "external_id": external_id or None,
-                    "title": title,
-                    "description": description,
-                    "ticket_type": ticket_type,
-                    "sprint_id": sprint_id,
-                })
-                if result:
-                    st.success(f"✅ Ticket **{title}** saved!")
-                    st.rerun()
+    st.markdown("---")
 
-    # Filter by sprint
-    filter_sprint = st.selectbox("Filter by Sprint", ["All"] + list(sprint_map.keys()))
-    sprint_id_filter = sprint_map.get(filter_sprint) if filter_sprint != "All" else None
-    tickets = load_tickets(sprint_id_filter)
+    # ── Fetch tickets for selected sprint ─────────────────────────────────────
+    jira_sprint_id = selected_sprint["jira_id"]
 
-    if tickets:
-        for t in tickets:
-            col1, col2 = st.columns([6, 1])
-            with col1:
-                ref = f"`{t['external_id']}`  " if t.get("external_id") else ""
-                st.markdown(f"**{ref}{t['title']}**  `{t['ticket_type']}`")
-                st.caption(t["description"][:160] + ("…" if len(t["description"]) > 160 else ""))
-            with col2:
-                if st.button("🗑️", key=f"del_ticket_{t['id']}"):
-                    api("delete", f"/tickets/{t['id']}")
-                    st.rerun()
-            st.markdown("---")
-    else:
-        st.info("No tickets found.")
+    # Cache tickets per sprint in session state
+    cache_key = f"tickets_{jira_sprint_id}"
+    if cache_key not in st.session_state:
+        with st.spinner("Fetching tickets from Jira…"):
+            st.session_state[cache_key] = jira_api("get", f"/jira/sprints/{jira_sprint_id}/tickets") or []
+
+    jira_tickets = st.session_state[cache_key]
+
+    col_h, col_ref = st.columns([4, 1])
+    col_h.markdown(f"### 🎫 {len(jira_tickets)} Ticket(s) in this Sprint")
+    if col_ref.button("🔄 Refresh", use_container_width=True):
+        st.session_state.pop(cache_key, None)
+        st.rerun()
+
+    if not jira_tickets:
+        st.info("No tickets found in this sprint.")
+        st.stop()
+
+    # Type icons
+    TYPE_ICON = {"story": "📖", "bug": "🐛", "task": "✅", "epic": "⚡", "improvement": "🔧"}
+    STATUS_BADGE = {
+        "To Do": "🔘", "In Progress": "🔵", "In Review": "🟡",
+        "Done": "🟢", "Blocked": "🔴",
+    }
+
+    # ── Save sprint + tickets to local DB for reporting ───────────────────────
+    # Auto-save sprint to local DB if not already there
+    local_sprints = {s["name"]: s["id"] for s in (load_sprints() or [])}
+    if selected_sprint["name"] not in local_sprints:
+        saved = api("post", "/sprints/", json={
+            "name":       selected_sprint["name"],
+            "goal":       selected_sprint.get("goal"),
+            "start_date": selected_sprint.get("start_date"),
+            "end_date":   selected_sprint.get("end_date"),
+        })
+        if saved:
+            local_sprints[selected_sprint["name"]] = saved["id"]
+            st.toast(f"Sprint '{selected_sprint['name']}' saved locally for reporting.", icon="💾")
+
+    local_sprint_id = local_sprints.get(selected_sprint["name"])
+
+    # Auto-save tickets to local DB
+    local_tickets  = {t["external_id"]: t["id"] for t in (load_tickets(local_sprint_id) or []) if t.get("external_id")}
+
+    for jt in jira_tickets:
+        if jt["jira_key"] not in local_tickets:
+            saved_t = api("post", "/tickets/", json={
+                "external_id":  jt["jira_key"],
+                "title":        jt["title"],
+                "description":  jt["description"] or jt["title"],
+                "ticket_type":  jt["issue_type"],
+                "sprint_id":    local_sprint_id,
+            })
+            if saved_t:
+                local_tickets[jt["jira_key"]] = saved_t["id"]
+
+    # ── Display tickets ───────────────────────────────────────────────────────
+    for jt in jira_tickets:
+        icon   = TYPE_ICON.get(jt["issue_type"].lower(), "📋")
+        badge  = STATUS_BADGE.get(jt["status"], "⚪")
+        local_id = local_tickets.get(jt["jira_key"])
+        tc_count = len(load_test_cases(local_id)) if local_id else 0
+
+        with st.expander(f"{icon} **{jt['jira_key']}** — {jt['title']}   {badge} {jt['status']}"):
+            col_l, col_r = st.columns([3, 1])
+            with col_l:
+                st.markdown(f"**Assignee:** {jt['assignee']}  &nbsp; **Priority:** {jt['priority']}  &nbsp; **Type:** {jt['issue_type'].title()}")
+                if jt.get("description"):
+                    st.caption(jt["description"][:300] + ("…" if len(jt["description"]) > 300 else ""))
+            with col_r:
+                st.link_button("� Open in Jira", jt["url"], use_container_width=True)
+                st.caption(f"📋 {tc_count} test case(s)")
+                if local_id and st.button("🤖 Generate Test Cases", key=f"gen_{jt['jira_key']}", use_container_width=True):
+                    with st.spinner("AI generating…"):
+                        result = api("post", f"/tickets/{local_id}/generate-test-cases/")
+                    if result:
+                        st.success(f"✅ {len(result)} test cases created!")
+                        st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -266,7 +395,7 @@ elif page == "📋  Test Cases":
 
     tickets = load_tickets()
     if not tickets:
-        st.warning("Create a ticket first.")
+        st.warning("Go to **Sprints & Tickets** first to load your Jira tickets.")
         st.stop()
 
     ticket_map = {f"{t.get('external_id', '') or ''} {t['title']}".strip(): t for t in tickets}
@@ -285,23 +414,23 @@ elif page == "📋  Test Cases":
     with col1:
         with st.expander("➕  Add Test Case Manually"):
             with st.form("new_tc"):
-                tc_title     = st.text_input("Title")
+                tc_title      = st.text_input("Title")
                 preconditions = st.text_input("Preconditions")
-                steps_raw    = st.text_area("Steps (one per line)", height=100)
-                expected     = st.text_area("Expected Result", height=60)
-                col_a, col_b = st.columns(2)
-                priority     = col_a.selectbox("Priority", ["Critical", "High", "Medium", "Low"])
-                tags         = col_b.text_input("Tags", placeholder="smoke, regression")
+                steps_raw     = st.text_area("Steps (one per line)", height=100)
+                expected      = st.text_area("Expected Result", height=60)
+                col_a, col_b  = st.columns(2)
+                priority      = col_a.selectbox("Priority", ["Critical", "High", "Medium", "Low"])
+                tags          = col_b.text_input("Tags", placeholder="smoke, regression")
                 if st.form_submit_button("💾  Save"):
                     steps_list = [s.strip() for s in steps_raw.strip().splitlines() if s.strip()]
                     api("post", "/test-cases/", json={
-                        "ticket_id": ticket["id"],
-                        "title": tc_title,
-                        "preconditions": preconditions,
-                        "steps": json.dumps(steps_list),
-                        "expected_result": expected,
-                        "priority": priority,
-                        "tags": tags,
+                        "ticket_id":      ticket["id"],
+                        "title":          tc_title,
+                        "preconditions":  preconditions,
+                        "steps":          json.dumps(steps_list),
+                        "expected_result":expected,
+                        "priority":       priority,
+                        "tags":           tags,
                     })
                     st.success("✅ Test case saved!")
                     st.rerun()

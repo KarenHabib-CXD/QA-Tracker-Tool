@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -10,6 +10,9 @@ import backend.models as models
 import backend.schemas as schemas
 from backend.services.ai_generator import generate_test_cases
 from backend.services.pdf_report import generate_sprint_pdf
+from backend.services.jira_service import (
+    verify_jira_user, fetch_sprints, fetch_tickets_for_sprint, fetch_single_ticket
+)
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
@@ -22,7 +25,62 @@ app = FastAPI(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SPRINTS
+# JIRA INTEGRATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _jira_creds(
+    x_jira_email: str = Header(..., alias="X-Jira-Email"),
+    x_jira_token: str = Header(..., alias="X-Jira-Token"),
+):
+    """Extract Jira credentials from request headers."""
+    return x_jira_email, x_jira_token
+
+
+@app.post("/jira/verify", tags=["Jira"])
+def jira_verify(creds=Depends(_jira_creds)):
+    """Verify Jira credentials and return user profile."""
+    email, token = creds
+    result = verify_jira_user(email, token)
+    if not result["ok"]:
+        raise HTTPException(401, detail={
+            "error": result.get("error", "Invalid credentials"),
+            "hint": (
+                "Make sure the email matches your Atlassian account at "
+                "https://id.atlassian.com — it may differ from your work email. "
+                f"You used: {email}"
+            )
+        })
+    return result
+
+
+@app.get("/jira/sprints", tags=["Jira"])
+def jira_sprints(state: str = "active,future,closed", creds=Depends(_jira_creds)):
+    """Fetch all sprints from the Jira board."""
+    email, token = creds
+    sprints = fetch_sprints(email, token, state)
+    return sprints
+
+
+@app.get("/jira/sprints/{jira_sprint_id}/tickets", tags=["Jira"])
+def jira_tickets(jira_sprint_id: int, creds=Depends(_jira_creds)):
+    """Fetch all tickets for a specific sprint."""
+    email, token = creds
+    tickets = fetch_tickets_for_sprint(email, token, jira_sprint_id)
+    return tickets
+
+
+@app.get("/jira/tickets/{ticket_key}", tags=["Jira"])
+def jira_single_ticket(ticket_key: str, creds=Depends(_jira_creds)):
+    """Fetch a single ticket by key e.g. APD-123."""
+    email, token = creds
+    ticket = fetch_single_ticket(email, token, ticket_key)
+    if "error" in ticket:
+        raise HTTPException(404, ticket["error"])
+    return ticket
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SPRINTS (local — kept as fallback / offline mode)
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/sprints/", response_model=schemas.SprintOut, tags=["Sprints"])
